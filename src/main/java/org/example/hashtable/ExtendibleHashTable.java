@@ -1,134 +1,151 @@
 package org.example.hashtable;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.*;
+import java.util.*;
 
-class KeyValue {
-    String key;
-    String value;
+class Bucket implements Serializable {
+    public int localDepth;
+    public int capacity;
+    public List<String> keys;
 
-    KeyValue(String key, String value) {
-        this.key = key;
-        this.value = value;
+    public Bucket(int localDepth, int capacity) {
+        this.localDepth = localDepth;
+        this.capacity = capacity;
+        this.keys = new ArrayList<>();
     }
-}
 
-class Bucket {
-    List<KeyValue> records;
+    public boolean isFull() {
+        return keys.size() >= capacity;
+    }
 
-    Bucket() {
-        this.records = new ArrayList<>();
+    public void insert(String key) {
+        if (!keys.contains(key)) {
+            keys.add(key);
+        }
+    }
+
+    public void remove(String key) {
+        keys.remove(key);
+    }
+
+    public boolean contains(String key) {
+        return keys.contains(key);
+    }
+
+    public void saveToFile(String filename) throws IOException {
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(filename))) {
+            oos.writeObject(this);
+        }
+    }
+
+    public static Bucket loadFromFile(String filename) throws IOException, ClassNotFoundException {
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(filename))) {
+            return (Bucket) ois.readObject();
+        }
     }
 }
 
 public class ExtendibleHashTable {
-    private List<Bucket> directory;
     private int globalDepth;
-    private int bucketSize;
-    private int[] localDepth;
+    private int bucketCapacity;
+    private List<String> directory;
+    private static int bucketCounter = 0;
 
-    public ExtendibleHashTable(int bucketSize) {
+    public ExtendibleHashTable(int bucketCapacity) throws IOException {
         this.globalDepth = 1;
-        this.bucketSize = bucketSize;
-        int directorySize = 1 << globalDepth;
-        this.directory = new ArrayList<>(directorySize);
-        Bucket initialBucket = new Bucket();
-        for (int i = 0; i < directorySize; i++) {
-            this.directory.add(initialBucket);
-        }
-        this.localDepth = new int[directorySize];
-        for (int i = 0; i < directorySize; i++) {
-            this.localDepth[i] = 1;
-        }
+        this.bucketCapacity = bucketCapacity;
+        this.directory = new ArrayList<>();
+        String bucketFile1 = createBucketFile(1);
+        String bucketFile2 = createBucketFile(1);
+        directory.add(bucketFile1);
+        directory.add(bucketFile2);
+    }
+
+    private String createBucketFile(int localDepth) throws IOException {
+        String filename = "tmp_" + (bucketCounter++) + ".txt";
+        Bucket bucket = new Bucket(localDepth, bucketCapacity);
+        bucket.saveToFile(filename);
+        return filename;
     }
 
     private int hash(String key) {
-        int h = key.hashCode();
-        return h & 0x7fffffff;
+        return key.hashCode() & ((1 << globalDepth) - 1);
     }
 
-    public void insert(String key, String value) {
-        int h = hash(key);
-        int bucketIndex = h & ((1 << globalDepth) - 1);
+    public void insert(String key) throws IOException, ClassNotFoundException {
+        int index = hash(key);
+        String bucketFile = directory.get(index);
+        Bucket bucket = Bucket.loadFromFile(bucketFile);
 
-        if (directory.get(bucketIndex).records.size() >= bucketSize) {
-            splitBucket(bucketIndex);
-            bucketIndex = h & ((1 << globalDepth) - 1);
+        if (!bucket.isFull()) {
+            bucket.insert(key);
+            bucket.saveToFile(bucketFile);
+            return;
         }
 
-        directory.get(bucketIndex).records.add(new KeyValue(key, value));
+        if (bucket.localDepth == globalDepth) {
+            expandDirectory();
+        }
+
+        splitBucket(index, bucket);
+        insert(key);
     }
 
-    private void splitBucket(int index) {
-        Bucket oldBucket = directory.get(index);
-        int oldLocalDepth = localDepth[index];
+    private void expandDirectory() {
+        globalDepth++;
+        List<String> newDir = new ArrayList<>(directory);
+        newDir.addAll(directory);
+        directory = newDir;
+    }
 
-        localDepth[index]++;
-        if (localDepth[index] > globalDepth) {
-            globalDepth++;
-            int newSize = 1 << globalDepth;
-            List<Bucket> newDirectory = new ArrayList<>(newSize);
-            int[] newLocalDepth = new int[newSize];
-            for (int i = 0; i < newSize; i++) {
-                int oldIndex = i & ((1 << (globalDepth - 1)) - 1);
-                newDirectory.add(directory.get(oldIndex));
-                newLocalDepth[i] = localDepth[oldIndex];
+    private void splitBucket(int index, Bucket oldBucket) throws IOException {
+        int localDepth = oldBucket.localDepth;
+        int newLocalDepth = localDepth + 1;
+
+        String newBucketFile0 = createBucketFile(newLocalDepth);
+        String newBucketFile1 = createBucketFile(newLocalDepth);
+
+        Bucket bucket0 = new Bucket(newLocalDepth, bucketCapacity);
+        Bucket bucket1 = new Bucket(newLocalDepth, bucketCapacity);
+
+        for (String key : oldBucket.keys) {
+            int newIndex = hash(key);
+            if ((newIndex & (1 << localDepth)) == 0) {
+                bucket0.insert(key);
+            } else {
+                bucket1.insert(key);
             }
-            directory = newDirectory;
-            localDepth = newLocalDepth;
         }
 
-        Bucket newBucket = new Bucket();
-        int mask = 1 << (localDepth[index] - 1);
+        bucket0.saveToFile(newBucketFile0);
+        bucket1.saveToFile(newBucketFile1);
 
         for (int i = 0; i < directory.size(); i++) {
-            if (directory.get(i) == oldBucket && ((i & mask) != 0)) {
-                directory.set(i, newBucket);
-                localDepth[i] = localDepth[index];
+            if (directory.get(i).equals(directory.get(index))) {
+                if ((i & (1 << localDepth)) == 0) {
+                    directory.set(i, newBucketFile0);
+                } else {
+                    directory.set(i, newBucketFile1);
+                }
             }
-        }
-
-        List<KeyValue> temp = new ArrayList<>(oldBucket.records);
-        oldBucket.records.clear();
-        for (KeyValue kv : temp) {
-            int hVal = hash(kv.key);
-            int idx = hVal & ((1 << globalDepth) - 1);
-            directory.get(idx).records.add(kv);
         }
     }
 
-    public String search(String key) {
-        int h = hash(key);
-        int bucketIndex = h & ((1 << globalDepth) - 1);
-        for (KeyValue kv : directory.get(bucketIndex).records) {
-            if (kv.key.equals(key)) {
-                return kv.value;
-            }
-        }
-        return null;
+    public boolean search(String key) throws IOException, ClassNotFoundException {
+        int index = hash(key);
+        Bucket bucket = Bucket.loadFromFile(directory.get(index));
+        return bucket.contains(key);
     }
 
-    public void delete(String key) {
-        int h = hash(key);
-        int bucketIndex = h & ((1 << globalDepth) - 1);
-        Bucket bucket = directory.get(bucketIndex);
-        bucket.records.removeIf(kv -> kv.key.equals(key));
+    public void delete(String key) throws IOException, ClassNotFoundException {
+        int index = hash(key);
+        String bucketFile = directory.get(index);
+        Bucket bucket = Bucket.loadFromFile(bucketFile);
+        bucket.remove(key);
+        bucket.saveToFile(bucketFile);
     }
 
-    public void printUnique() {
-        Map<Bucket, List<Integer>> map = new HashMap<>();
-        for (int i = 0; i < directory.size(); i++) {
-            Bucket b = directory.get(i);
-            map.computeIfAbsent(b, k -> new ArrayList<>()).add(i);
-        }
-        for (Map.Entry<Bucket, List<Integer>> entry : map.entrySet()) {
-            System.out.print("Directory indices " + entry.getValue() + " -> ");
-            for (KeyValue kv : entry.getKey().records) {
-                System.out.print("[" + kv.key + "=" + kv.value + "] ");
-            }
-            System.out.println();
-        }
+    public boolean contains(String key) throws IOException, ClassNotFoundException {
+        return search(key);
     }
 }
